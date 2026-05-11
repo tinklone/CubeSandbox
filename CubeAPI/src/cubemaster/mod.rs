@@ -867,11 +867,15 @@ enum SandboxStatusValue {
 }
 
 fn sandbox_status_text_from_code(number: i32) -> &'static str {
+    // Align with protobuf ContainerState enum:
+    //   0=CREATED, 1=RUNNING, 2=EXITED, 3=UNKNOWN, 4=PAUSING, 5=PAUSED
     match number {
+        0 => "created",
         1 => "running",
-        2 => "paused",
-        3 => "stopped",
-        4 => "error",
+        2 => "exited",
+        3 => "unknown",
+        4 => "pausing",
+        5 => "paused",
         _ => "unknown",
     }
 }
@@ -891,14 +895,12 @@ where
 }
 
 fn normalize_sandbox_status_text(raw: &str) -> String {
-    match raw.trim().to_lowercase().as_str() {
-        "1" => sandbox_status_text_from_code(1).to_string(),
-        "2" => sandbox_status_text_from_code(2).to_string(),
-        "3" => sandbox_status_text_from_code(3).to_string(),
-        "4" => sandbox_status_text_from_code(4).to_string(),
-        "running" | "paused" | "stopped" | "error" => raw.trim().to_lowercase(),
-        other => other.to_string(),
+    let trimmed = raw.trim();
+    // Handle string-encoded numeric codes (e.g. "5" instead of 5)
+    if let Ok(code) = trimmed.parse::<i32>() {
+        return sandbox_status_text_from_code(code).to_string();
     }
+    trimmed.to_lowercase()
 }
 
 pub(crate) fn extract_template_id(
@@ -1437,7 +1439,8 @@ pub struct NodeResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_path_segment, CubeMasterError, GetSandboxResponse, SandboxInfo};
+    use super::{validate_path_segment, CubeMasterError, GetSandboxResponse, SandboxInfo,
+             normalize_sandbox_status_text, sandbox_status_text_from_code};
 
     #[test]
     fn build_id_path_segment_accepts_alphanumeric_and_hyphen() {
@@ -1538,5 +1541,31 @@ mod tests {
                 .timestamp_nanos_opt(),
             Some(1713953785140309977)
         );
+    }
+
+    #[test]
+    fn status_code_matches_protobuf_container_state_enum() {
+        // Verify alignment with cubebox.proto ContainerState:
+        //   0=CREATED, 1=RUNNING, 2=EXITED, 3=UNKNOWN, 4=PAUSING, 5=PAUSED
+        assert_eq!(sandbox_status_text_from_code(0), "created");
+        assert_eq!(sandbox_status_text_from_code(1), "running");
+        assert_eq!(sandbox_status_text_from_code(2), "exited");
+        assert_eq!(sandbox_status_text_from_code(3), "unknown");
+        assert_eq!(sandbox_status_text_from_code(4), "pausing");
+        assert_eq!(sandbox_status_text_from_code(5), "paused");
+        assert_eq!(sandbox_status_text_from_code(99), "unknown");
+    }
+
+    #[test]
+    fn normalize_status_text_handles_string_encoded_codes() {
+        // Numeric strings should be decoded via sandbox_status_text_from_code
+        assert_eq!(normalize_sandbox_status_text("0"), "created");
+        assert_eq!(normalize_sandbox_status_text("1"), "running");
+        assert_eq!(normalize_sandbox_status_text("5"), "paused");
+        assert_eq!(normalize_sandbox_status_text("99"), "unknown");
+        // Text statuses should be lowercased
+        assert_eq!(normalize_sandbox_status_text("Running"), "running");
+        assert_eq!(normalize_sandbox_status_text("PAUSED"), "paused");
+        assert_eq!(normalize_sandbox_status_text(" Pausing "), "pausing");
     }
 }

@@ -625,7 +625,7 @@ fn sandbox_state_from_status(status: SandboxStatus) -> SandboxState {
 
 fn sandbox_state_from_str(status: &str) -> SandboxState {
     match status.to_lowercase().as_str() {
-        "paused" => SandboxState::Paused,
+        "paused" | "pausing" => SandboxState::Paused,
         _ => SandboxState::Running,
     }
 }
@@ -681,9 +681,10 @@ pub(crate) fn build_cubevs_context(
 mod tests {
     use std::collections::HashMap;
 
-    use super::{build_cubevs_context, filter_by_metadata, from_cubemaster_info};
+    use super::{build_cubevs_context, filter_by_metadata, from_cubemaster_info,
+                 sandbox_state_from_str, parse_state_filter};
     use crate::cubemaster::SandboxInfo;
-    use crate::models::SandboxNetworkConfig;
+    use crate::models::{SandboxNetworkConfig, SandboxState};
 
     #[test]
     fn metadata_filter_matches_all_pairs() {
@@ -736,5 +737,24 @@ mod tests {
         assert_eq!(listed.cpu_count, 2);
         assert_eq!(listed.memory_mb, 2048);
         assert_eq!(listed.template_id, "tpl-1");
+    }
+
+    #[test]
+    fn sandbox_state_from_str_maps_paused_and_pausing() {
+        assert_eq!(sandbox_state_from_str("paused"), SandboxState::Paused);
+        assert_eq!(sandbox_state_from_str("pausing"), SandboxState::Paused);
+        assert_eq!(sandbox_state_from_str("PAUSED"), SandboxState::Paused);
+        assert_eq!(sandbox_state_from_str("Pausing"), SandboxState::Paused);
+        assert_eq!(sandbox_state_from_str("running"), SandboxState::Running);
+        assert_eq!(sandbox_state_from_str("created"), SandboxState::Running);
+        assert_eq!(sandbox_state_from_str("unknown"), SandboxState::Running);
+    }
+
+    #[test]
+    fn parse_state_filter_recognizes_paused() {
+        assert_eq!(parse_state_filter(Some("paused")), Some(SandboxState::Paused));
+        assert_eq!(parse_state_filter(Some("running")), Some(SandboxState::Running));
+        assert_eq!(parse_state_filter(None), None);
+        assert_eq!(parse_state_filter(Some("invalid")), None);
     }
 }
