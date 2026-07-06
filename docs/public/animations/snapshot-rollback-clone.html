@@ -1,0 +1,1122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CubeSandbox · Snapshot / Rollback / Clone 原理动画</title>
+<style>
+  :root {
+    --bg-0: #070B10;
+    --bg-1: #0C1117;
+    --bg-2: #151B24;
+    --border: #1F2732;
+    --text-1: #E6EDF3;
+    --text-2: #8B98A8;
+    --text-3: #4A5668;
+    --primary: #5B8DEF;
+    --primary-glow: #7AA7FF;
+    --cyan: #22D3EE;
+    --violet: #A78BFA;
+    --amber: #F59E0B;
+    --rose: #F43F5E;
+    --emerald: #10B981;
+    --r-sm: 6px; --r-md: 10px; --r-lg: 14px; --r-xl: 20px;
+    --ease: cubic-bezier(0.22, 1, 0.36, 1);
+    --mono: "JetBrains Mono", "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: "Inter", -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg-0);
+    color: var(--text-1);
+    font-family: var(--sans);
+    line-height: 1.6;
+    overflow-x: hidden;
+  }
+  ::selection { background: rgba(91,141,239,.35); }
+
+  /* ---------- layout ---------- */
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+  section { padding: 88px 0; position: relative; }
+  h2 { font-size: 32px; letter-spacing: -0.02em; margin-bottom: 8px; }
+  .kicker {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .18em;
+    text-transform: uppercase; margin-bottom: 14px; display: inline-flex;
+    align-items: center; gap: 8px;
+  }
+  .kicker::before { content: ""; width: 22px; height: 1px; background: currentColor; opacity: .6; }
+  .lede { color: var(--text-2); max-width: 720px; font-size: 15.5px; margin-bottom: 36px; }
+  .lede code, td code, .step-desc code, .note code {
+    font-family: var(--mono); font-size: .86em; color: var(--primary-glow);
+    background: rgba(91,141,239,.10); padding: 1px 6px; border-radius: 4px;
+    border: 1px solid rgba(91,141,239,.18);
+  }
+
+  /* ---------- hero ---------- */
+  .hero { padding: 110px 0 70px; text-align: center; position: relative; }
+  .hero::before {
+    content: ""; position: absolute; inset: -40% -20% auto;
+    height: 130%; pointer-events: none;
+    background:
+      radial-gradient(600px 340px at 30% 20%, rgba(91,141,239,.16), transparent 65%),
+      radial-gradient(520px 300px at 70% 10%, rgba(167,139,250,.13), transparent 65%),
+      radial-gradient(460px 280px at 50% 45%, rgba(34,211,238,.07), transparent 65%);
+  }
+  .hero .badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 12px; color: var(--text-2);
+    border: 1px solid var(--border); border-radius: 999px; padding: 6px 14px;
+    background: rgba(255,255,255,.03); backdrop-filter: blur(12px);
+    margin-bottom: 26px;
+  }
+  .hero .badge .dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--cyan);
+    animation: breathe 1.6s var(--ease) infinite;
+  }
+  @keyframes breathe { 0%,100% { opacity: 1; box-shadow: 0 0 0 0 rgba(34,211,238,.5);} 50% { opacity: .55; box-shadow: 0 0 0 6px rgba(34,211,238,0);} }
+  .hero h1 {
+    font-size: clamp(34px, 5.4vw, 58px); line-height: 1.12; letter-spacing: -0.03em;
+    margin-bottom: 18px; font-weight: 700;
+  }
+  .hero h1 .grad {
+    background: linear-gradient(135deg, #5B8DEF 0%, #A78BFA 50%, #22D3EE 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .hero p { color: var(--text-2); max-width: 640px; margin: 0 auto 34px; font-size: 16px; }
+  .hero-nav { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .hero-nav a {
+    text-decoration: none; color: var(--text-1); font-size: 14px;
+    border: 1px solid var(--border); border-radius: var(--r-md);
+    padding: 10px 18px; background: var(--bg-1);
+    transition: border-color .22s var(--ease), transform .22s var(--ease), box-shadow .22s var(--ease);
+    display: inline-flex; align-items: center; gap: 8px; font-family: var(--mono);
+  }
+  .hero-nav a:hover { transform: translateY(-2px); }
+  .hero-nav a .sq { width: 9px; height: 9px; border-radius: 2px; }
+  .hero-nav a[href="#snapshot"]:hover { border-color: var(--violet); box-shadow: 0 4px 24px rgba(167,139,250,.15); }
+  .hero-nav a[href="#rollback"]:hover { border-color: var(--amber); box-shadow: 0 4px 24px rgba(245,158,11,.15); }
+  .hero-nav a[href="#clone"]:hover   { border-color: var(--emerald); box-shadow: 0 4px 24px rgba(16,185,129,.15); }
+
+  /* ---------- architecture strip ---------- */
+  .arch {
+    display: flex; align-items: center; justify-content: center; gap: 0;
+    margin-top: 58px; flex-wrap: wrap;
+  }
+  .arch .node {
+    border: 1px solid var(--border); background: var(--bg-1);
+    border-radius: var(--r-md); padding: 10px 16px; text-align: center; min-width: 118px;
+  }
+  .arch .node b { display: block; font-size: 13.5px; font-weight: 600; }
+  .arch .node span { font-size: 11px; color: var(--text-3); font-family: var(--mono); }
+  .arch .link { width: 44px; height: 2px; position: relative; background: var(--border); overflow: hidden; }
+  .arch .link::after {
+    content: ""; position: absolute; top: 0; left: 0; width: 14px; height: 2px;
+    background: linear-gradient(90deg, transparent, var(--primary-glow), transparent);
+    animation: flow 1.8s linear infinite;
+  }
+  @keyframes flow { from { left: -14px; } to { left: 100%; } }
+
+  /* ---------- stage (shared animation frame) ---------- */
+  .stage-card {
+    border: 1px solid var(--border); border-radius: var(--r-xl);
+    background: linear-gradient(180deg, var(--bg-1), rgba(12,17,23,.6));
+    overflow: hidden;
+  }
+  .stage-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px; border-bottom: 1px solid var(--border);
+    background: rgba(255,255,255,.02);
+  }
+  .stage-head .title { font-family: var(--mono); font-size: 12.5px; color: var(--text-2); display: flex; align-items: center; gap: 10px; }
+  .traffic { display: flex; gap: 6px; }
+  .traffic i { width: 10px; height: 10px; border-radius: 50%; background: var(--bg-2); border: 1px solid var(--border); }
+  .controls { display: flex; align-items: center; gap: 10px; }
+  .btn {
+    font-family: var(--mono); font-size: 12px; color: var(--text-1);
+    background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--r-sm);
+    padding: 5px 12px; cursor: pointer; transition: all .12s var(--ease);
+  }
+  .btn:hover { border-color: var(--primary); color: var(--primary-glow); }
+  .stage-body { display: grid; grid-template-columns: 1.55fr 1fr; min-height: 460px; }
+  @media (max-width: 880px) { .stage-body { grid-template-columns: 1fr; } }
+  .canvas { position: relative; padding: 8px; }
+  .canvas svg { width: 100%; height: 100%; display: block; }
+
+  /* ---------- step list ---------- */
+  .steps { border-left: 1px solid var(--border); padding: 18px 16px; display: flex; flex-direction: column; gap: 6px; }
+  @media (max-width: 880px) { .steps { border-left: none; border-top: 1px solid var(--border); } }
+  .step {
+    display: flex; gap: 12px; padding: 10px 12px; border-radius: var(--r-md);
+    border: 1px solid transparent; transition: all .3s var(--ease);
+    opacity: .45; cursor: pointer;
+  }
+  .step:hover { opacity: .8; }
+  .step.active { opacity: 1; background: var(--bg-2); border-color: var(--border); }
+  .step .num {
+    font-family: var(--mono); font-size: 11px; flex-shrink: 0;
+    width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center;
+    justify-content: center; border: 1px solid var(--border); color: var(--text-3);
+    margin-top: 2px; transition: all .3s var(--ease);
+  }
+  .step.active .num { border-color: currentColor; }
+  .step.done .num { color: var(--text-2); }
+  .step .step-title { font-size: 13.5px; font-weight: 600; }
+  .step .step-desc { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
+  .s-violet .step.active { box-shadow: inset 2px 0 0 var(--violet); }
+  .s-violet .step.active .num { color: var(--violet); }
+  .s-amber .step.active { box-shadow: inset 2px 0 0 var(--amber); }
+  .s-amber .step.active .num { color: var(--amber); }
+  .s-emerald .step.active { box-shadow: inset 2px 0 0 var(--emerald); }
+  .s-emerald .step.active .num { color: var(--emerald); }
+
+  .progress-track { height: 2px; background: var(--border); position: relative; }
+  .progress-bar { height: 100%; width: 0; transition: width .25s linear; }
+  #snapshot .progress-bar { background: var(--violet); }
+  #rollback .progress-bar { background: var(--amber); }
+  #clone .progress-bar { background: var(--emerald); }
+
+  /* ---------- svg shared ---------- */
+  text { font-family: var(--mono); }
+  .lbl { fill: var(--text-2); font-size: 10.5px; }
+  .lbl-sm { fill: var(--text-3); font-size: 9px; }
+  .lbl-b { fill: var(--text-1); font-size: 11.5px; font-weight: 600; }
+  .box { fill: var(--bg-2); stroke: var(--border); stroke-width: 1; rx: 8; }
+  .wire { stroke: var(--border); stroke-width: 1.5; fill: none; }
+
+  .hidden-el { opacity: 0; }
+  .fade-in { animation: fadeIn .5s var(--ease) forwards; }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  .pop-in { animation: popIn .45s var(--ease) forwards; transform-origin: center; transform-box: fill-box; }
+  @keyframes popIn { from { opacity: 0; transform: scale(.7); } to { opacity: 1; transform: scale(1); } }
+
+  .pulse-cyan { animation: pulseCyan 1.6s var(--ease) infinite; }
+  @keyframes pulseCyan { 0%,100% { opacity: 1; } 50% { opacity: .5; } }
+
+  .dash-flow { stroke-dasharray: 6 6; animation: dashMove 1s linear infinite; }
+  @keyframes dashMove { to { stroke-dashoffset: -12; } }
+
+  .shiver { animation: shiver .5s var(--ease); }
+  @keyframes shiver { 0%,100% { transform: translateX(0);} 25% { transform: translateX(-2px);} 75% { transform: translateX(2px);} }
+
+  /* memory page grid cells */
+  .page-cell { fill: rgba(34,211,238,.16); stroke: rgba(34,211,238,.4); stroke-width: .6; transition: fill .4s, stroke .4s; }
+  .page-cell.dirty { fill: rgba(245,158,11,.55); stroke: rgba(245,158,11,.9); }
+  .page-cell.saved { fill: rgba(167,139,250,.5); stroke: rgba(167,139,250,.9); }
+  .page-cell.frozen { fill: rgba(74,86,104,.35); stroke: rgba(74,86,104,.7); }
+
+  /* comparison table */
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { padding: 12px 14px; border: 1px solid var(--border); text-align: left; vertical-align: top; }
+  th { font-family: var(--mono); font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-2); background: var(--bg-1); font-weight: 500; }
+  td { color: var(--text-2); background: rgba(12,17,23,.5); }
+  td:first-child { color: var(--text-1); font-weight: 600; white-space: nowrap; }
+  .tag { font-family: var(--mono); font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid; display: inline-block; }
+  .tag.v { color: var(--violet); border-color: rgba(167,139,250,.4); background: rgba(167,139,250,.08); }
+  .tag.a { color: var(--amber); border-color: rgba(245,158,11,.4); background: rgba(245,158,11,.08); }
+  .tag.e { color: var(--emerald); border-color: rgba(16,185,129,.4); background: rgba(16,185,129,.08); }
+
+  .note {
+    border: 1px solid var(--border); border-left: 3px solid var(--primary);
+    border-radius: var(--r-sm); padding: 14px 18px; margin-top: 28px;
+    color: var(--text-2); font-size: 13.5px; background: var(--bg-1);
+  }
+
+  footer { border-top: 1px solid var(--border); padding: 36px 0 48px; color: var(--text-3); font-size: 12.5px; font-family: var(--mono); text-align: center; }
+  footer a { color: var(--text-2); }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <div class="wrap">
+    <div class="badge"><span class="dot"></span>CubeSandbox · microVM 沙箱运行时</div>
+    <h1>快照 · 回滚 · 克隆<br><span class="grad">三个动画看懂沙箱状态引擎</span></h1>
+    <p>
+      基于 CubeSandbox 源码逐层拆解:从 Python SDK 一直到 hypervisor 与 cubecow CoW 存储,
+      看一个运行中的 microVM 如何被<b>持久化</b>、<b>原地穿越</b>、以及<b>瞬间分身</b>。
+    </p>
+    <nav class="hero-nav">
+      <a href="#snapshot"><span class="sq" style="background:var(--violet)"></span>Snapshot 快照</a>
+      <a href="#rollback"><span class="sq" style="background:var(--amber)"></span>Rollback 回滚</a>
+      <a href="#clone"><span class="sq" style="background:var(--emerald)"></span>Clone 克隆</a>
+      <a href="#compare"><span class="sq" style="background:var(--primary)"></span>三者关系</a>
+    </nav>
+
+    <div class="arch" aria-label="调用链路:SDK 到 hypervisor">
+      <div class="node"><b>Python SDK</b><span>sandbox.py</span></div>
+      <div class="link"></div>
+      <div class="node"><b>CubeAPI</b><span>snapshots.rs</span></div>
+      <div class="link"></div>
+      <div class="node"><b>CubeMaster</b><span>snapshot_ops.go</span></div>
+      <div class="link"></div>
+      <div class="node"><b>Cubelet</b><span>template_ops.go</span></div>
+      <div class="link"></div>
+      <div class="node"><b>CubeShim</b><span>snapshot/mod.rs</span></div>
+      <div class="link"></div>
+      <div class="node"><b>hypervisor</b><span>vm.rs</span></div>
+    </div>
+  </div>
+</header>
+
+<!-- ================= SNAPSHOT ================= -->
+<section id="snapshot">
+  <div class="wrap">
+    <div class="kicker" style="color:var(--violet)">01 · SNAPSHOT</div>
+    <h2>快照:给运行中的 VM 拍一张"全息照片"</h2>
+    <p class="lede">
+      <code>sb.create_snapshot()</code> 把沙箱的<b>内存 + 磁盘 + 设备状态</b>持久化为 <code>snap-xxx</code>。
+      磁盘走 cubecow 的 <code>FICLONE</code> reflink,O(1) 完成;内存则在 VM 短暂
+      <b>pause</b> 期间落盘 —— 并且带三级增量策略:优先只写脏页(<code>soft-dirty</code>),
+      写完立刻 <b>resume</b>,源沙箱几乎无感。
+    </p>
+
+    <div class="stage-card s-violet">
+      <div class="stage-head">
+        <div class="title"><span class="traffic"><i></i><i></i><i></i></span> CommitSandbox — 快照全链路</div>
+        <div class="controls">
+          <button class="btn" data-act="replay">↺ 重播</button>
+          <button class="btn" data-act="toggle">⏸ 暂停</button>
+        </div>
+      </div>
+      <div class="progress-track"><div class="progress-bar"></div></div>
+      <div class="stage-body">
+        <div class="canvas">
+          <svg viewBox="0 0 620 440" role="img" aria-label="快照流程动画">
+            <!-- source sandbox VM -->
+            <g id="sn-vm">
+              <rect x="40" y="60" width="240" height="220" class="box" rx="12"/>
+              <text x="56" y="86" class="lbl-b">sandbox sb-01</text>
+              <g id="sn-vm-state">
+                <circle id="sn-live-dot" cx="252" cy="80" r="5" fill="var(--cyan)" class="pulse-cyan"/>
+                <text id="sn-live-txt" x="244" y="84" text-anchor="end" class="lbl" fill="var(--cyan)">RUNNING</text>
+              </g>
+              <!-- memory page grid 6x4 -->
+              <text x="56" y="112" class="lbl-sm">guest RAM(内存页)</text>
+              <g id="sn-pages"></g>
+              <!-- vcpu + devices -->
+              <rect x="56" y="212" width="98" height="48" class="box"/>
+              <text x="105" y="232" text-anchor="middle" class="lbl">vCPU / 设备</text>
+              <text x="105" y="248" text-anchor="middle" class="lbl-sm">state.json</text>
+              <rect x="166" y="212" width="98" height="48" class="box"/>
+              <text x="215" y="232" text-anchor="middle" class="lbl">rootfs 可写层</text>
+              <text x="215" y="248" text-anchor="middle" class="lbl-sm">sb-01-rootfs-gen0</text>
+            </g>
+
+            <!-- pause overlay -->
+            <g id="sn-pause" class="hidden-el">
+              <rect x="40" y="60" width="240" height="220" rx="12" fill="rgba(245,158,11,.08)" stroke="var(--amber)" stroke-width="1.5" stroke-dasharray="5 4"/>
+              <rect x="120" y="30" width="84" height="22" rx="11" fill="rgba(245,158,11,.15)" stroke="var(--amber)"/>
+              <text x="162" y="45" text-anchor="middle" class="lbl" fill="var(--amber)">❚❚ PAUSED</text>
+            </g>
+
+            <!-- cubecow -->
+            <g id="sn-cow">
+              <rect x="40" y="330" width="240" height="76" class="box" rx="12"/>
+              <text x="56" y="354" class="lbl-b">cubecow(xfs reflink)</text>
+              <text x="56" y="372" class="lbl-sm">FICLONE:只克隆元数据,不拷数据块</text>
+              <text x="56" y="388" class="lbl-sm">O(1) 完成磁盘快照</text>
+            </g>
+
+            <!-- snapshot artifact -->
+            <g id="sn-artifact">
+              <rect x="370" y="60" width="210" height="346" rx="12" fill="rgba(167,139,250,.05)" stroke="var(--violet)" stroke-dasharray="5 4" opacity=".55"/>
+              <text x="475" y="88" text-anchor="middle" class="lbl-b" fill="var(--violet)">snap-9f2c(快照产物)</text>
+
+              <g id="sn-a-rootfs" class="hidden-el">
+                <rect x="390" y="106" width="170" height="52" class="box" stroke="var(--violet)"/>
+                <text x="475" y="128" text-anchor="middle" class="lbl">tpl-snap-rootfs</text>
+                <text x="475" y="146" text-anchor="middle" class="lbl-sm">磁盘 CoW 克隆(FICLONE)</text>
+              </g>
+              <g id="sn-a-mem" class="hidden-el">
+                <rect x="390" y="170" width="170" height="52" class="box" stroke="var(--violet)"/>
+                <text x="475" y="192" text-anchor="middle" class="lbl">tpl-snap-memory</text>
+                <text x="475" y="210" text-anchor="middle" class="lbl-sm" id="sn-a-mem-mode">memory-ranges(脏页)</text>
+              </g>
+              <g id="sn-a-state" class="hidden-el">
+                <rect x="390" y="234" width="170" height="52" class="box" stroke="var(--violet)"/>
+                <text x="475" y="256" text-anchor="middle" class="lbl">state.json + config.json</text>
+                <text x="475" y="274" text-anchor="middle" class="lbl-sm">vCPU / virtio 设备 / VM 拓扑</text>
+              </g>
+              <g id="sn-a-catalog" class="hidden-el">
+                <rect x="390" y="298" width="170" height="52" class="box" stroke="var(--violet)"/>
+                <text x="475" y="320" text-anchor="middle" class="lbl">catalog.json</text>
+                <text x="475" y="338" text-anchor="middle" class="lbl-sm">Cubelet 本地物理引用索引</text>
+              </g>
+              <g id="sn-a-ready" class="hidden-el">
+                <rect x="410" y="364" width="130" height="26" rx="13" fill="rgba(16,185,129,.12)" stroke="var(--emerald)"/>
+                <text x="475" y="381" text-anchor="middle" class="lbl" fill="var(--emerald)">✓ READY</text>
+              </g>
+            </g>
+
+            <!-- transfer wires -->
+            <path id="sn-wire-rootfs" class="wire hidden-el" d="M 264 240 C 330 240, 320 132, 386 132" stroke="var(--violet)"/>
+            <path id="sn-wire-mem" class="wire hidden-el" d="M 284 150 C 340 150, 330 196, 386 196" stroke="var(--violet)"/>
+            <path id="sn-wire-state" class="wire hidden-el" d="M 156 240 C 156 300, 320 260, 386 260" stroke="var(--violet)"/>
+
+            <!-- api call chip -->
+            <g id="sn-api" class="hidden-el">
+              <rect x="40" y="10" width="252" height="26" rx="13" fill="rgba(91,141,239,.1)" stroke="var(--primary)"/>
+              <text x="166" y="27" text-anchor="middle" class="lbl" fill="var(--primary-glow)">POST /sandboxes/sb-01/snapshots</text>
+            </g>
+            <!-- tier chip -->
+            <g id="sn-tier" class="hidden-el">
+              <rect x="310" y="10" width="270" height="26" rx="13" fill="rgba(245,158,11,.08)" stroke="var(--amber)"/>
+              <text x="445" y="27" text-anchor="middle" class="lbl" fill="var(--amber)" id="sn-tier-txt">soft-dirty:只落盘脏页(增量)</text>
+            </g>
+          </svg>
+        </div>
+
+        <div class="steps" id="sn-steps">
+          <div class="step" data-i="0">
+            <span class="num">1</span>
+            <div><div class="step-title">发起请求</div>
+            <div class="step-desc">SDK 调 <code>create_snapshot()</code>,经 CubeAPI → CubeMaster 建作业,gRPC 下发 <code>CommitSandbox</code> 到沙箱所在节点的 Cubelet。</div></div>
+          </div>
+          <div class="step" data-i="1">
+            <span class="num">2</span>
+            <div><div class="step-title">磁盘:FICLONE 克隆 rootfs</div>
+            <div class="step-desc">cubecow 对运行中 rootfs 做 reflink(<code>CommitTemplateRootfs</code>),只复制元数据,<b>O(1)</b> 得到 <code>tpl-snap-rootfs</code>。</div></div>
+          </div>
+          <div class="step" data-i="2">
+            <span class="num">3</span>
+            <div><div class="step-title">暂停 VM</div>
+            <div class="step-desc"><code>cube-runtime</code> 连上已有 VM 的 API socket,发 <code>vm.pause</code>。内存页在这一刻被"冻结"。</div></div>
+          </div>
+          <div class="step" data-i="3">
+            <span class="num">4</span>
+            <div><div class="step-title">内存:三级增量落盘</div>
+            <div class="step-desc"><code>vm.snapshot</code> 写内存页。优先 <b>soft-dirty</b>(只写自上次快照的脏页)→ 退化 <b>incremental</b> → 兜底 <b>full</b> 全量。</div></div>
+          </div>
+          <div class="step" data-i="4">
+            <span class="num">5</span>
+            <div><div class="step-title">设备状态落盘</div>
+            <div class="step-desc">hypervisor 导出 <code>state.json</code>(vCPU、virtio 设备)与 <code>config.json</code>(VM 拓扑),快照三要素齐了。</div></div>
+          </div>
+          <div class="step" data-i="5">
+            <span class="num">6</span>
+            <div><div class="step-title">恢复运行 + 登记目录</div>
+            <div class="step-desc"><code>vm.resume</code> 源沙箱继续跑;Cubelet 写 <code>catalog.json</code>,Master 标记 <code>snap-9f2c</code> READY。全程停顿仅为内存落盘的一瞬。</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= ROLLBACK ================= -->
+<section id="rollback">
+  <div class="wrap">
+    <div class="kicker" style="color:var(--amber)">02 · ROLLBACK</div>
+    <h2>回滚:让同一个沙箱原地"时光倒流"</h2>
+    <p class="lede">
+      <code>sb.rollback(snap_id)</code> 把沙箱<b>原地</b>恢复到快照时刻:内存与文件系统完全还原,
+      但 <b>sandbox_id、IP、tap、MAC 全部不变</b>,上层连接无需重建。实现上不做临时 checkpoint,
+      而是直接 <code>VmDelete</code> 掉当前 VM 对象,再从快照 <code>VmResumeFromSnapshot</code> "长"回来 ——
+      快照本身保留,可以反复回滚。
+    </p>
+
+    <div class="stage-card s-amber">
+      <div class="stage-head">
+        <div class="title"><span class="traffic"><i></i><i></i><i></i></span> RollbackSandbox — 原地恢复</div>
+        <div class="controls">
+          <button class="btn" data-act="replay">↺ 重播</button>
+          <button class="btn" data-act="toggle">⏸ 暂停</button>
+        </div>
+      </div>
+      <div class="progress-track"><div class="progress-bar"></div></div>
+      <div class="stage-body">
+        <div class="canvas">
+          <svg viewBox="0 0 620 440" role="img" aria-label="回滚流程动画">
+            <!-- snapshot store (left) -->
+            <g id="rb-snap">
+              <rect x="30" y="140" width="180" height="180" rx="12" fill="rgba(167,139,250,.05)" stroke="var(--violet)" stroke-dasharray="5 4"/>
+              <text x="120" y="166" text-anchor="middle" class="lbl-b" fill="var(--violet)">snap-9f2c</text>
+              <rect x="48" y="182" width="144" height="36" class="box" stroke="var(--violet)"/>
+              <text x="120" y="204" text-anchor="middle" class="lbl-sm">tpl-snap-rootfs(磁盘)</text>
+              <rect x="48" y="226" width="144" height="36" class="box" stroke="var(--violet)"/>
+              <text x="120" y="248" text-anchor="middle" class="lbl-sm">tpl-snap-memory(内存)</text>
+              <rect x="48" y="270" width="144" height="36" class="box" stroke="var(--violet)"/>
+              <text x="120" y="292" text-anchor="middle" class="lbl-sm">state.json / config.json</text>
+              <g id="rb-snap-kept" class="hidden-el">
+                <rect x="52" y="118" width="136" height="22" rx="11" fill="rgba(167,139,250,.14)" stroke="var(--violet)"/>
+                <text x="120" y="133" text-anchor="middle" class="lbl-sm" fill="var(--violet)">快照保留 · 可再次回滚</text>
+              </g>
+            </g>
+
+            <!-- sandbox (right) -->
+            <g id="rb-vm">
+              <rect id="rb-vm-frame" x="330" y="110" width="250" height="240" class="box" rx="12"/>
+              <text x="346" y="138" class="lbl-b">sandbox sb-01</text>
+              <text x="346" y="156" class="lbl-sm" id="rb-id-note">sandbox_id 不变 · IP / MAC 不变</text>
+              <g id="rb-vm-live">
+                <circle cx="552" cy="132" r="5" fill="var(--cyan)" class="pulse-cyan"/>
+                <text x="544" y="136" text-anchor="end" class="lbl" fill="var(--cyan)" id="rb-state-txt">RUNNING</text>
+              </g>
+
+              <!-- current dirty content -->
+              <g id="rb-cur">
+                <rect x="346" y="176" width="218" height="64" class="box" stroke="rgba(244,63,94,.55)"/>
+                <text x="455" y="200" text-anchor="middle" class="lbl">当前状态:/tmp/v.txt = "v2"</text>
+                <text x="455" y="220" text-anchor="middle" class="lbl-sm" fill="var(--rose)">跑偏了,想回到 checkpoint</text>
+              </g>
+
+              <!-- restored content -->
+              <g id="rb-restored" class="hidden-el">
+                <rect x="346" y="176" width="218" height="64" class="box" stroke="rgba(245,158,11,.7)"/>
+                <text x="455" y="200" text-anchor="middle" class="lbl">恢复状态:/tmp/v.txt = "v1"</text>
+                <text x="455" y="220" text-anchor="middle" class="lbl-sm" fill="var(--amber)">内存 + 磁盘回到快照时刻</text>
+              </g>
+
+              <!-- rootfs gen -->
+              <g id="rb-gen0">
+                <rect x="346" y="256" width="218" height="42" class="box"/>
+                <text x="455" y="274" text-anchor="middle" class="lbl">rootfs:sb-01-rootfs-gen0</text>
+                <text x="455" y="290" text-anchor="middle" class="lbl-sm">旧的可写层</text>
+              </g>
+              <g id="rb-gen1" class="hidden-el">
+                <rect x="346" y="256" width="218" height="42" class="box" stroke="var(--amber)"/>
+                <text x="455" y="274" text-anchor="middle" class="lbl">rootfs:sb-01-rootfs-gen1</text>
+                <text x="455" y="290" text-anchor="middle" class="lbl-sm" fill="var(--amber)">从快照 FICLONE 派生的新一代可写层</text>
+              </g>
+
+              <!-- net stays -->
+              <g id="rb-net">
+                <rect x="346" y="308" width="218" height="30" class="box" stroke="rgba(34,211,238,.4)"/>
+                <text x="455" y="328" text-anchor="middle" class="lbl-sm" fill="var(--cyan)">网络:tap / MAC / IP 原样沿用</text>
+              </g>
+            </g>
+
+            <!-- delete X overlay -->
+            <g id="rb-delete" class="hidden-el">
+              <rect x="330" y="110" width="250" height="240" rx="12" fill="rgba(244,63,94,.07)" stroke="var(--rose)" stroke-width="1.5" stroke-dasharray="5 4"/>
+              <rect x="380" y="82" width="150" height="22" rx="11" fill="rgba(244,63,94,.15)" stroke="var(--rose)"/>
+              <text x="455" y="97" text-anchor="middle" class="lbl" fill="var(--rose)">✕ VmDelete(VM 对象)</text>
+            </g>
+            <!-- vmm survives chip -->
+            <g id="rb-vmm" class="hidden-el">
+              <rect x="360" y="368" width="190" height="24" rx="12" fill="rgba(139,152,168,.08)" stroke="var(--border)"/>
+              <text x="455" y="384" text-anchor="middle" class="lbl-sm">VMM 进程保持存活,只换 VM 对象</text>
+            </g>
+
+            <!-- restore wires -->
+            <path id="rb-wire-mem" class="wire hidden-el" d="M 196 244 C 270 244, 260 208, 326 208" stroke="var(--amber)"/>
+            <path id="rb-wire-disk" class="wire hidden-el" d="M 196 200 C 280 200, 250 277, 326 277" stroke="var(--amber)"/>
+
+            <!-- api chip -->
+            <g id="rb-api" class="hidden-el">
+              <rect x="30" y="20" width="280" height="26" rx="13" fill="rgba(91,141,239,.1)" stroke="var(--primary)"/>
+              <text x="170" y="37" text-anchor="middle" class="lbl" fill="var(--primary-glow)">POST /sandboxes/sb-01/rollback</text>
+            </g>
+            <!-- catalog chip -->
+            <g id="rb-catalog" class="hidden-el">
+              <rect x="30" y="56" width="280" height="26" rx="13" fill="rgba(245,158,11,.08)" stroke="var(--amber)"/>
+              <text x="170" y="73" text-anchor="middle" class="lbl" fill="var(--amber)">Cubelet 查 catalog.json 定位快照物理卷</text>
+            </g>
+          </svg>
+        </div>
+
+        <div class="steps" id="rb-steps">
+          <div class="step" data-i="0">
+            <span class="num">1</span>
+            <div><div class="step-title">发起回滚</div>
+            <div class="step-desc">SDK 调 <code>rollback(snap_id)</code>,Master 建回滚作业并分配新的 rootfs 代数 <code>gen+1</code>,gRPC 下发 <code>RollbackSandbox</code>。</div></div>
+          </div>
+          <div class="step" data-i="1">
+            <span class="num">2</span>
+            <div><div class="step-title">catalog 定位 + 派生新 rootfs</div>
+            <div class="step-desc">Cubelet 从本地 <code>catalog.json</code> 找到快照的物理卷,<code>RollbackDeriveNewGen</code> 从快照 rootfs FICLONE 出全新可写层 <code>gen1</code>。</div></div>
+          </div>
+          <div class="step" data-i="2">
+            <span class="num">3</span>
+            <div><div class="step-title">删除当前 VM 对象</div>
+            <div class="step-desc">CubeShim 收到 <code>RollbackSnapshot</code>:断开 agent、直接 <code>VmDelete</code> —— 不做临时 checkpoint,省一次内存落盘 I/O。VMM 进程本身不退出。</div></div>
+          </div>
+          <div class="step" data-i="3">
+            <span class="num">4</span>
+            <div><div class="step-title">从快照恢复 VM</div>
+            <div class="step-desc"><code>VmResumeFromSnapshot</code>:内存映射快照内存卷,设备状态读 <code>state.json</code>,磁盘指向新派生的 <code>gen1</code> rootfs。</div></div>
+          </div>
+          <div class="step" data-i="4">
+            <span class="num">5</span>
+            <div><div class="step-title">网络与身份原样保留</div>
+            <div class="step-desc">RestoreConfig 不携带 <code>net</code> 字段 —— tap、MAC、IP 沿用当前沙箱配置。<b>sandbox_id 不变</b>,SDK 里的 <code>sb</code> 对象继续可用。</div></div>
+          </div>
+          <div class="step" data-i="5">
+            <span class="num">6</span>
+            <div><div class="step-title">继续运行,可反复回滚</div>
+            <div class="step-desc">重连 agent、恢复运行;旧 <code>gen0</code> rootfs 异步回收。快照保留,可再次回滚,也可以继续写入后再打新快照。</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= CLONE ================= -->
+<section id="clone">
+  <div class="wrap">
+    <div class="kicker" style="color:var(--emerald)">03 · CLONE</div>
+    <h2>克隆:一秒派生 N 个平行宇宙</h2>
+    <p class="lede">
+      <code>sb.clone(n=N)</code> = <b>临时快照 + 从快照并行创建 N 个新沙箱 + 自动删快照</b>。
+      每个克隆体完整继承源沙箱 clone 时刻的内存与文件,但拥有独立的 CoW rootfs、
+      新的 sandbox_id / IP / MAC,之后写入互不可见。源沙箱只在打快照的一瞬被 pause,随后照常运行。
+    </p>
+
+    <div class="stage-card s-emerald">
+      <div class="stage-head">
+        <div class="title"><span class="traffic"><i></i><i></i><i></i></span> clone(n=3) — 快照驱动的 fan-out</div>
+        <div class="controls">
+          <button class="btn" data-act="replay">↺ 重播</button>
+          <button class="btn" data-act="toggle">⏸ 暂停</button>
+        </div>
+      </div>
+      <div class="progress-track"><div class="progress-bar"></div></div>
+      <div class="stage-body">
+        <div class="canvas">
+          <svg viewBox="0 0 620 440" role="img" aria-label="克隆流程动画">
+            <!-- source sandbox -->
+            <g id="cl-src">
+              <rect x="30" y="60" width="170" height="120" class="box" rx="12"/>
+              <text x="46" y="88" class="lbl-b">源沙箱 sb-01</text>
+              <g id="cl-src-live">
+                <circle cx="182" cy="82" r="5" fill="var(--cyan)" class="pulse-cyan"/>
+              </g>
+              <text x="46" y="112" class="lbl-sm">/tmp/shared.txt = "hello"</text>
+              <text x="46" y="130" class="lbl-sm">内存里跑着 Agent 进程</text>
+              <g id="cl-src-cont" class="hidden-el">
+                <rect x="42" y="146" width="146" height="22" rx="11" fill="rgba(34,211,238,.1)" stroke="var(--cyan)"/>
+                <text x="115" y="161" text-anchor="middle" class="lbl-sm" fill="var(--cyan)">clone 后继续运行,不受影响</text>
+              </g>
+            </g>
+            <g id="cl-src-pause" class="hidden-el">
+              <rect x="30" y="60" width="170" height="120" rx="12" fill="rgba(245,158,11,.08)" stroke="var(--amber)" stroke-width="1.5" stroke-dasharray="5 4"/>
+              <text x="115" y="50" text-anchor="middle" class="lbl" fill="var(--amber)">❚❚ 瞬时 pause</text>
+            </g>
+
+            <!-- temp snapshot -->
+            <g id="cl-snap" class="hidden-el">
+              <rect x="70" y="240" width="150" height="86" rx="12" fill="rgba(167,139,250,.06)" stroke="var(--violet)" stroke-dasharray="5 4"/>
+              <text x="145" y="266" text-anchor="middle" class="lbl-b" fill="var(--violet)">snap-tmp</text>
+              <text x="145" y="288" text-anchor="middle" class="lbl-sm">内存 + rootfs + state</text>
+              <text x="145" y="306" text-anchor="middle" class="lbl-sm">临时中间快照</text>
+            </g>
+            <path id="cl-wire-snap" class="wire hidden-el" d="M 115 184 L 130 236" stroke="var(--violet)"/>
+
+            <!-- snapshot deleted overlay -->
+            <g id="cl-snap-del" class="hidden-el">
+              <line x1="80" y1="250" x2="210" y2="316" stroke="var(--rose)" stroke-width="2"/>
+              <line x1="210" y1="250" x2="80" y2="316" stroke="var(--rose)" stroke-width="2"/>
+              <rect x="60" y="336" width="170" height="22" rx="11" fill="rgba(244,63,94,.1)" stroke="var(--rose)"/>
+              <text x="145" y="351" text-anchor="middle" class="lbl-sm" fill="var(--rose)">delete_snapshot(自动清理)</text>
+            </g>
+
+            <!-- clones -->
+            <g id="cl-clones">
+              <g class="cl-clone hidden-el" id="cl-c1">
+                <rect x="330" y="40" width="250" height="106" class="box" rx="12" stroke="var(--emerald)"/>
+                <text x="346" y="66" class="lbl-b">克隆 1 · sb-a7</text>
+                <circle cx="562" cy="62" r="4" fill="var(--cyan)" class="pulse-cyan"/>
+                <text x="346" y="88" class="lbl-sm">独立 CoW rootfs(FICLONE,O(1))</text>
+                <text x="346" y="106" class="lbl-sm">内存从快照卷映射恢复</text>
+                <text x="346" y="124" class="lbl-sm" fill="var(--emerald)">新 IP / 新 MAC / 新 vsock</text>
+              </g>
+              <g class="cl-clone hidden-el" id="cl-c2">
+                <rect x="330" y="164" width="250" height="106" class="box" rx="12" stroke="var(--emerald)"/>
+                <text x="346" y="190" class="lbl-b">克隆 2 · sb-b3</text>
+                <circle cx="562" cy="186" r="4" fill="var(--cyan)" class="pulse-cyan"/>
+                <text x="346" y="212" class="lbl-sm">继承 clone 时刻的全部状态</text>
+                <text x="346" y="230" class="lbl-sm">/tmp/shared.txt = "hello" ✓</text>
+                <text x="346" y="248" class="lbl-sm" fill="var(--emerald)">写入与其他副本互不可见</text>
+              </g>
+              <g class="cl-clone hidden-el" id="cl-c3">
+                <rect x="330" y="288" width="250" height="106" class="box" rx="12" stroke="var(--emerald)"/>
+                <text x="346" y="314" class="lbl-b">克隆 3 · sb-c9</text>
+                <circle cx="562" cy="310" r="4" fill="var(--cyan)" class="pulse-cyan"/>
+                <text x="346" y="336" class="lbl-sm">Agent 并行 rollout 分支 #3</text>
+                <text x="346" y="354" class="lbl-sm">concurrency 参数控制并发创建</text>
+                <text x="346" y="372" class="lbl-sm" fill="var(--emerald)">失败自动 kill 兄弟,无孤儿</text>
+              </g>
+            </g>
+            <path id="cl-wire-c1" class="wire hidden-el" d="M 224 268 C 290 268, 270 93, 326 93" stroke="var(--emerald)"/>
+            <path id="cl-wire-c2" class="wire hidden-el" d="M 224 283 C 290 283, 270 217, 326 217" stroke="var(--emerald)"/>
+            <path id="cl-wire-c3" class="wire hidden-el" d="M 224 298 C 290 298, 270 341, 326 341" stroke="var(--emerald)"/>
+
+            <!-- api chip -->
+            <g id="cl-api" class="hidden-el">
+              <rect x="30" y="10" width="200" height="26" rx="13" fill="rgba(91,141,239,.1)" stroke="var(--primary)"/>
+              <text x="130" y="27" text-anchor="middle" class="lbl" fill="var(--primary-glow)">sb.clone(n=3, concurrency=3)</text>
+            </g>
+            <!-- isolation chip -->
+            <g id="cl-iso" class="hidden-el">
+              <rect x="330" y="406" width="250" height="24" rx="12" fill="rgba(16,185,129,.08)" stroke="var(--emerald)"/>
+              <text x="455" y="422" text-anchor="middle" class="lbl-sm" fill="var(--emerald)">继承性 ✓ 隔离性 ✓ 连续性 ✓</text>
+            </g>
+          </svg>
+        </div>
+
+        <div class="steps" id="cl-steps">
+          <div class="step" data-i="0">
+            <span class="num">1</span>
+            <div><div class="step-title">发起 clone</div>
+            <div class="step-desc">SDK 收到 <code>clone(n=3)</code>。克隆没有独立的服务端 API,而是由 SDK 编排"快照 → 批量创建 → 清理"三部曲。</div></div>
+          </div>
+          <div class="step" data-i="1">
+            <span class="num">2</span>
+            <div><div class="step-title">打临时快照</div>
+            <div class="step-desc">内部先调 <code>create_snapshot()</code>:源沙箱瞬时 pause → 落盘内存/磁盘/状态 → resume,得到中间产物 <code>snap-tmp</code>。</div></div>
+          </div>
+          <div class="step" data-i="2">
+            <span class="num">3</span>
+            <div><div class="step-title">并行创建 N 个新沙箱</div>
+            <div class="step-desc">每个克隆走 <code>Sandbox.create(template=snap-tmp)</code>:FICLONE 出独立可写 rootfs,内存从快照卷恢复,分配<b>全新</b>的 id / tap / MAC / vsock。</div></div>
+          </div>
+          <div class="step" data-i="3">
+            <span class="num">4</span>
+            <div><div class="step-title">继承 + 隔离</div>
+            <div class="step-desc">每个副本从源沙箱 clone 时刻的状态出发(文件、内存进程全在),之后的写入落在各自 CoW 层,互不可见;源沙箱全程照常运行。</div></div>
+          </div>
+          <div class="step" data-i="4">
+            <span class="num">5</span>
+            <div><div class="step-title">自动清理临时快照</div>
+            <div class="step-desc">全部创建成功后,SDK 在 <code>finally</code> 里删除 <code>snap-tmp</code>;若任一子任务失败,已创建的克隆会被自动 <code>kill()</code>,不留孤儿资源。</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= COMPARISON ================= -->
+<section id="compare">
+  <div class="wrap">
+    <div class="kicker" style="color:var(--primary)">04 · 三者关系</div>
+    <h2>同一套底座,三种玩法</h2>
+    <p class="lede">
+      三个功能共享同一套底层机制:<b>cubecow FICLONE</b> 负责 O(1) 磁盘克隆,
+      <b>hypervisor 的 pause / snapshot / restore</b> 负责内存与设备状态,
+      <b>Cubelet catalog</b> 负责物理引用索引。Snapshot 是地基,Rollback 消费快照,Clone 编排快照。
+    </p>
+
+    <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr>
+            <th>维度</th>
+            <th><span class="tag v">Snapshot 快照</span></th>
+            <th><span class="tag a">Rollback 回滚</span></th>
+            <th><span class="tag e">Clone 克隆</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>一句话</td>
+            <td>把运行状态持久化成 <code>snap-xxx</code></td>
+            <td>把当前沙箱原地恢复到某个快照</td>
+            <td>临时快照 + 派生 N 个独立新沙箱</td>
+          </tr>
+          <tr>
+            <td>sandbox_id</td>
+            <td>不变(源沙箱继续跑)</td>
+            <td><b>不变</b>(原地穿越)</td>
+            <td>新建 N 个</td>
+          </tr>
+          <tr>
+            <td>VM 操作</td>
+            <td>pause → snapshot → resume</td>
+            <td>VmDelete → VmResumeFromSnapshot</td>
+            <td>为每个副本 restore 出新 VM</td>
+          </tr>
+          <tr>
+            <td>磁盘(cubecow)</td>
+            <td>FICLONE 当前 rootfs → 模板卷</td>
+            <td>从快照卷派生新一代可写层(gen+1)</td>
+            <td>每副本 FICLONE 一份独立可写 rootfs</td>
+          </tr>
+          <tr>
+            <td>内存</td>
+            <td>soft-dirty / incremental / full 三级落盘</td>
+            <td>映射快照内存卷恢复</td>
+            <td>共享只读内存基线,运行后各自独立</td>
+          </tr>
+          <tr>
+            <td>网络</td>
+            <td>不涉及</td>
+            <td>tap / MAC / IP 原样沿用</td>
+            <td>每副本重新分配 IP / MAC / vsock</td>
+          </tr>
+          <tr>
+            <td>快照生命周期</td>
+            <td>持久,直到显式 <code>delete_snapshot</code></td>
+            <td>回滚后快照保留,可反复使用</td>
+            <td>临时快照用完即删(SDK 自动)</td>
+          </tr>
+          <tr>
+            <td>典型场景</td>
+            <td>checkpoint、状态持久化、制模板</td>
+            <td>Agent 回退-重试循环、撤销失败一步</td>
+            <td>并行 rollout、A/B 实验、可重复评测</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note">
+      <b style="color:var(--text-1)">设计亮点速览</b><br>
+      ① <b>reflink 一切</b>:rootfs 和内存卷都靠 xfs FICLONE,克隆成本与数据量无关;
+      ② <b>三级内存增量</b>:优先 soft-dirty 只写脏页,兜底才全量,快照又快又省;
+      ③ <b>回滚免 checkpoint</b>:直接 VmDelete + restore,少一次内存落盘;
+      ④ <b>控制面薄、节点厚</b>:Master 只记逻辑 ID 与作业状态,物理卷引用全在 Cubelet 本地 catalog,故障域小;
+      ⑤ <b>快照即模板</b>:<code>snap-xxx</code> 可直接作为 <code>Sandbox.create(template=...)</code> 的入参,统一了快照与模板两个模型。
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    基于 CubeSandbox 源码分析生成 ·
+    关键路径:<a href="https://github.com/TencentCloud/CubeSandbox" target="_blank" rel="noopener">Cubelet/services/cubebox</a> · CubeShim/shim/src/snapshot · cubecow
+  </div>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* ---------- tiny timeline engine ---------- */
+  function Timeline(sectionId, steps) {
+    this.section = document.getElementById(sectionId);
+    this.steps = steps;                    // [{dur, enter(ctx)}]
+    this.stepEls = this.section.querySelectorAll(".step");
+    this.bar = this.section.querySelector(".progress-bar");
+    this.toggleBtn = this.section.querySelector('[data-act="toggle"]');
+    this.replayBtn = this.section.querySelector('[data-act="replay"]');
+    this.i = -1;
+    this.timer = null;
+    this.tick = null;
+    this.paused = false;
+    this.started = false;
+
+    var self = this;
+    this.replayBtn.addEventListener("click", function () { self.restart(); });
+    this.toggleBtn.addEventListener("click", function () { self.togglePause(); });
+    this.stepEls.forEach(function (el) {
+      el.addEventListener("click", function () {
+        self.jumpTo(parseInt(el.dataset.i, 10));
+      });
+    });
+
+    // start when scrolled into view
+    if ("IntersectionObserver" in window) {
+      var io = new IntersectionObserver(function (entries) {
+        entries.forEach(function (e) {
+          if (e.isIntersecting && !self.started) { self.started = true; self.restart(); io.disconnect(); }
+        });
+      }, { threshold: 0.25 });
+      io.observe(this.section);
+    } else {
+      this.restart();
+    }
+  }
+
+  Timeline.prototype.clearTimers = function () {
+    clearTimeout(this.timer); this.timer = null;
+    cancelAnimationFrame(this.tick); this.tick = null;
+  };
+
+  Timeline.prototype.restart = function () { this.jumpTo(0); };
+
+  Timeline.prototype.togglePause = function () {
+    if (this.paused) {
+      this.paused = false;
+      this.toggleBtn.textContent = "⏸ 暂停";
+      this.scheduleNext(this.remaining);
+    } else {
+      this.paused = true;
+      this.toggleBtn.textContent = "▶ 播放";
+      this.remaining = Math.max(0, this.stepEnd - performance.now());
+      this.clearTimers();
+    }
+  };
+
+  Timeline.prototype.jumpTo = function (idx) {
+    this.clearTimers();
+    this.paused = false;
+    this.toggleBtn.textContent = "⏸ 暂停";
+    // full reset then replay steps 0..idx (enter fns are cumulative-safe)
+    this.resetFn && this.resetFn();
+    for (var k = 0; k <= idx; k++) {
+      this.steps[k].enter(k === idx);
+    }
+    this.i = idx;
+    this.updateStepUI();
+    this.scheduleNext(reduced ? 0 : this.steps[idx].dur);
+  };
+
+  Timeline.prototype.scheduleNext = function (dur) {
+    var self = this;
+    if (reduced) dur = Math.min(dur, 800);
+    this.stepEnd = performance.now() + dur;
+    var start = performance.now();
+    function frame(now) {
+      var p = Math.min(1, (now - start) / dur);
+      self.bar.style.width = (((self.i + p) / self.steps.length) * 100) + "%";
+      if (p < 1) self.tick = requestAnimationFrame(frame);
+    }
+    if (dur > 0) this.tick = requestAnimationFrame(frame);
+    this.timer = setTimeout(function () {
+      var next = self.i + 1;
+      if (next >= self.steps.length) {
+        // loop after a pause
+        self.timer = setTimeout(function () { self.restart(); }, 2600);
+      } else {
+        self.jumpTo(next);
+      }
+    }, dur);
+  };
+
+  Timeline.prototype.updateStepUI = function () {
+    var i = this.i;
+    this.stepEls.forEach(function (el, idx) {
+      el.classList.toggle("active", idx === i);
+      el.classList.toggle("done", idx < i);
+    });
+  };
+
+  /* ---------- helpers ---------- */
+  function show(id, cls) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.classList.remove("hidden-el", "fade-in", "pop-in");
+    void el.getBoundingClientRect(); // restart animation
+    el.classList.add(cls || "fade-in");
+  }
+  function hide(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.classList.remove("fade-in", "pop-in");
+    el.classList.add("hidden-el");
+  }
+  function drawWire(id, on) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    if (on) {
+      el.classList.remove("hidden-el");
+      el.classList.add("dash-flow");
+    } else {
+      el.classList.add("hidden-el");
+      el.classList.remove("dash-flow");
+    }
+  }
+
+  /* ================= SNAPSHOT ================= */
+  var SN_COLS = 8, SN_ROWS = 4;
+  var snPagesG = document.getElementById("sn-pages");
+  (function buildPages() {
+    var w = 24, h = 18, gx = 56, gy = 122;
+    for (var r = 0; r < SN_ROWS; r++) {
+      for (var c = 0; c < SN_COLS; c++) {
+        var rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+        rect.setAttribute("x", gx + c * (w + 3));
+        rect.setAttribute("y", gy + r * (h + 3));
+        rect.setAttribute("width", w);
+        rect.setAttribute("height", h);
+        rect.setAttribute("rx", 3);
+        rect.setAttribute("class", "page-cell");
+        rect.dataset.idx = r * SN_COLS + c;
+        snPagesG.appendChild(rect);
+      }
+    }
+  })();
+  var snCells = snPagesG.querySelectorAll(".page-cell");
+  var snDirty = [2, 5, 9, 12, 14, 19, 21, 26, 28, 30]; // pseudo dirty pages
+
+  function snReset() {
+    ["sn-api", "sn-pause", "sn-tier", "sn-a-rootfs", "sn-a-mem", "sn-a-state", "sn-a-catalog", "sn-a-ready"].forEach(hide);
+    ["sn-wire-rootfs", "sn-wire-mem", "sn-wire-state"].forEach(function (id) { drawWire(id, false); });
+    snCells.forEach(function (c) { c.classList.remove("dirty", "saved", "frozen"); });
+    var dot = document.getElementById("sn-live-dot");
+    var txt = document.getElementById("sn-live-txt");
+    dot.setAttribute("fill", "var(--cyan)"); dot.classList.add("pulse-cyan");
+    txt.textContent = "RUNNING"; txt.setAttribute("fill", "var(--cyan)");
+  }
+
+  function snSetPaused(paused) {
+    var dot = document.getElementById("sn-live-dot");
+    var txt = document.getElementById("sn-live-txt");
+    if (paused) {
+      show("sn-pause", "fade-in");
+      dot.setAttribute("fill", "var(--amber)"); dot.classList.remove("pulse-cyan");
+      txt.textContent = "PAUSED"; txt.setAttribute("fill", "var(--amber)");
+      snCells.forEach(function (c) { if (!c.classList.contains("dirty")) c.classList.add("frozen"); });
+    } else {
+      hide("sn-pause");
+      dot.setAttribute("fill", "var(--cyan)"); dot.classList.add("pulse-cyan");
+      txt.textContent = "RUNNING"; txt.setAttribute("fill", "var(--cyan)");
+      snCells.forEach(function (c) { c.classList.remove("frozen"); });
+    }
+  }
+
+  var snTl = new Timeline("snapshot", [
+    { dur: 3200, enter: function () {           // 1 request
+        show("sn-api", "pop-in");
+        // mark dirty pages appearing progressively
+        snDirty.forEach(function (idx, k) {
+          setTimeout(function () { snCells[idx].classList.add("dirty"); }, 150 + k * 120);
+        });
+      } },
+    { dur: 3400, enter: function () {           // 2 FICLONE rootfs
+        snDirty.forEach(function (idx) { snCells[idx].classList.add("dirty"); });
+        drawWire("sn-wire-rootfs", true);
+        show("sn-a-rootfs", "pop-in");
+      } },
+    { dur: 2800, enter: function () {           // 3 pause
+        snSetPaused(true);
+      } },
+    { dur: 4200, enter: function (live) {       // 4 memory dump (dirty pages fly)
+        snSetPaused(true);
+        show("sn-tier", "pop-in");
+        drawWire("sn-wire-mem", true);
+        show("sn-a-mem", "pop-in");
+        snDirty.forEach(function (idx, k) {
+          if (live) {
+            setTimeout(function () {
+              snCells[idx].classList.remove("dirty");
+              snCells[idx].classList.add("saved");
+            }, 300 + k * 220);
+          } else {
+            snCells[idx].classList.remove("dirty");
+            snCells[idx].classList.add("saved");
+          }
+        });
+      } },
+    { dur: 3000, enter: function () {           // 5 state.json
+        snSetPaused(true);
+        snDirty.forEach(function (idx) { snCells[idx].classList.remove("dirty"); snCells[idx].classList.add("saved"); });
+        drawWire("sn-wire-state", true);
+        show("sn-a-state", "pop-in");
+      } },
+    { dur: 3600, enter: function () {           // 6 resume + catalog + ready
+        snSetPaused(false);
+        drawWire("sn-wire-mem", false);
+        drawWire("sn-wire-state", false);
+        drawWire("sn-wire-rootfs", false);
+        snCells.forEach(function (c) { c.classList.remove("saved", "dirty"); });
+        show("sn-a-catalog", "pop-in");
+        show("sn-a-ready", "pop-in");
+      } }
+  ]);
+  snTl.resetFn = snReset;
+
+  /* ================= ROLLBACK ================= */
+  function rbReset() {
+    ["rb-api", "rb-catalog", "rb-gen1", "rb-delete", "rb-vmm", "rb-restored", "rb-snap-kept"].forEach(hide);
+    ["rb-wire-mem", "rb-wire-disk"].forEach(function (id) { drawWire(id, false); });
+    show("rb-cur", "fade-in");
+    show("rb-gen0", "fade-in");
+    var g = document.getElementById("rb-vm-live");
+    g.classList.remove("hidden-el");
+    document.getElementById("rb-state-txt").textContent = "RUNNING";
+    document.getElementById("rb-vm-frame").setAttribute("stroke", "var(--border)");
+  }
+
+  var rbTl = new Timeline("rollback", [
+    { dur: 3000, enter: function () {           // 1 request
+        show("rb-api", "pop-in");
+      } },
+    { dur: 3400, enter: function () {           // 2 catalog + derive gen1
+        show("rb-catalog", "pop-in");
+        hide("rb-gen0");
+        show("rb-gen1", "pop-in");
+        drawWire("rb-wire-disk", true);
+      } },
+    { dur: 3200, enter: function () {           // 3 VmDelete
+        show("rb-delete", "fade-in");
+        hide("rb-cur");
+        document.getElementById("rb-state-txt").textContent = "DELETED";
+        document.getElementById("rb-vm-live").querySelector("circle").setAttribute("fill", "var(--rose)");
+        show("rb-vmm", "pop-in");
+      } },
+    { dur: 3600, enter: function () {           // 4 restore from snapshot
+        hide("rb-delete");
+        drawWire("rb-wire-mem", true);
+        show("rb-restored", "pop-in");
+        document.getElementById("rb-vm-frame").setAttribute("stroke", "var(--amber)");
+        var dot = document.getElementById("rb-vm-live").querySelector("circle");
+        dot.setAttribute("fill", "var(--amber)");
+        document.getElementById("rb-state-txt").textContent = "RESTORING";
+      } },
+    { dur: 3000, enter: function () {           // 5 network kept
+        var net = document.getElementById("rb-net");
+        net.classList.add("shiver");
+        setTimeout(function () { net.classList.remove("shiver"); }, 600);
+      } },
+    { dur: 3600, enter: function () {           // 6 running again, snapshot kept
+        drawWire("rb-wire-mem", false);
+        drawWire("rb-wire-disk", false);
+        var dot = document.getElementById("rb-vm-live").querySelector("circle");
+        dot.setAttribute("fill", "var(--cyan)");
+        document.getElementById("rb-state-txt").textContent = "RUNNING";
+        document.getElementById("rb-vm-frame").setAttribute("stroke", "var(--border)");
+        show("rb-snap-kept", "pop-in");
+        hide("rb-vmm");
+      } }
+  ]);
+  rbTl.resetFn = rbReset;
+
+  /* ================= CLONE ================= */
+  function clReset() {
+    ["cl-api", "cl-src-pause", "cl-snap", "cl-snap-del", "cl-c1", "cl-c2", "cl-c3", "cl-iso", "cl-src-cont"].forEach(hide);
+    ["cl-wire-snap", "cl-wire-c1", "cl-wire-c2", "cl-wire-c3"].forEach(function (id) { drawWire(id, false); });
+  }
+
+  var clTl = new Timeline("clone", [
+    { dur: 2800, enter: function () {           // 1 request
+        show("cl-api", "pop-in");
+      } },
+    { dur: 3600, enter: function (live) {       // 2 temp snapshot (with quick pause flash)
+        show("cl-src-pause", "fade-in");
+        drawWire("cl-wire-snap", true);
+        show("cl-snap", "pop-in");
+        if (live) setTimeout(function () { hide("cl-src-pause"); }, 1800);
+        else hide("cl-src-pause");
+      } },
+    { dur: 4200, enter: function (live) {       // 3 fan-out create
+        hide("cl-src-pause");
+        var seq = [["cl-wire-c1", "cl-c1"], ["cl-wire-c2", "cl-c2"], ["cl-wire-c3", "cl-c3"]];
+        seq.forEach(function (pair, k) {
+          if (live) {
+            setTimeout(function () {
+              drawWire(pair[0], true);
+              show(pair[1], "pop-in");
+            }, k * 700);
+          } else {
+            drawWire(pair[0], true);
+            show(pair[1], "pop-in");
+          }
+        });
+      } },
+    { dur: 3400, enter: function () {           // 4 inherit + isolate
+        ["cl-c1", "cl-c2", "cl-c3"].forEach(function (id) { show(id, "fade-in"); });
+        show("cl-iso", "pop-in");
+        show("cl-src-cont", "pop-in");
+      } },
+    { dur: 3800, enter: function () {           // 5 delete temp snapshot
+        ["cl-wire-c1", "cl-wire-c2", "cl-wire-c3", "cl-wire-snap"].forEach(function (id) { drawWire(id, false); });
+        show("cl-snap-del", "fade-in");
+      } }
+  ]);
+  clTl.resetFn = clReset;
+
+})();
+</script>
+</body>
+</html>
